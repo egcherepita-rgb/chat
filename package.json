@@ -1,0 +1,9 @@
+{
+  "name": "site-chat",
+  "version": "1.0.0",
+  "description": "Онлайн-чат для сайта с ответами из Telegram",
+  "main": "server.js",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" }
+}
