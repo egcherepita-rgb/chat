@@ -67,6 +67,27 @@ bash install.sh chat.prometgs.ru
 
 Логи, если что-то не так: `journalctl -u site-chat -f`
 
+### Если хостер блокирует Telegram
+
+Если в логах `Telegram: fetch failed`, а `curl -m 10 https://api.telegram.org` зависает, нужен прокси. Бесплатно это делается через Cloudflare Worker (Workers & Pages → Create application → Hello World, имя `tg-proxy`) с таким кодом:
+
+```js
+export default {
+  async fetch(req) {
+    const url = new URL(req.url);
+    url.hostname = 'api.telegram.org';
+    return fetch(new Request(url, req));
+  }
+};
+```
+
+Затем добавьте адрес Worker в `.env` и перезапустите чат:
+
+```bash
+echo 'TG_API=https://tg-proxy.ВАШ-АККАУНТ.workers.dev' >> /opt/chat/.env
+systemctl restart site-chat
+```
+
 > Если на сервере уже работает другой веб-сервер (например, Apache) на 80/443 порту, скрипт не сможет запустить nginx. В этом случае напишите мне, подстроим.
 
 ## Шаг 5. Уберите Jivo и подключите чат на сайте (1С-Битрикс)
