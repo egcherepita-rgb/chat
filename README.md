@@ -113,7 +113,7 @@ systemctl restart site-chat
   data-position="right"></script>
 ```
 
-`data-color` — основной цвет, `data-accent` — второй цвет градиента, `data-button-color` — цвет кнопки чата, `data-position` — `right` или `left`.
+`data-color` — основной цвет, `data-accent` — второй цвет градиента, `data-button-color` — цвет кнопки чата, `data-position` — `right` или `left`. `data-hours="8-18"` и `data-days="1-5"` — когда чат виден (по Москве, по умолчанию пн–пт с 8:00 до 18:00).
 
 ## Шаг 6. Проверка
 

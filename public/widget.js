@@ -11,6 +11,8 @@
     color: script.getAttribute('data-color') || '#255f6c',
     accent: script.getAttribute('data-accent') || '#60ab9e',
     button: script.getAttribute('data-button-color') || '#ff7a1a',
+    hours: script.getAttribute('data-hours') || '8-18',
+    days: script.getAttribute('data-days') || '1-5',
     position: script.getAttribute('data-position') === 'left' ? 'left' : 'right',
   };
 
@@ -280,6 +282,27 @@
     void btn.offsetWidth;
     btn.classList.add('shake');
   }, 9000);
+
+  // Чат виден только в рабочее время по Москве: data-hours="8-18", data-days="1-5" (пн–пт).
+  function workingTime() {
+    var m = /^(\d{1,2})-(\d{1,2})$/.exec(cfg.hours);
+    if (!m) return true;
+    var parts = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+    var get = function (t) { return Number(parts.filter(function (p) { return p.type === t; })[0].value); };
+    var now = get('hour') * 60 + get('minute');
+    var dm = /^([1-7])-([1-7])$/.exec(cfg.days);
+    if (dm) {
+      var wd = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Moscow', weekday: 'short' }).format(new Date());
+      var day = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(wd) + 1;
+      if (day < Number(dm[1]) || day > Number(dm[2])) return false;
+    }
+    return now >= Number(m[1]) * 60 && now < Number(m[2]) * 60;
+  }
+  function applyHours() {
+    host.style.display = workingTime() ? '' : 'none';
+  }
+  applyHours();
+  setInterval(applyHours, 60000);
 
   function mount() {
     document.body.appendChild(host);
