@@ -113,7 +113,7 @@ systemctl restart site-chat
   data-position="right"></script>
 ```
 
-`data-color` — основной цвет, `data-accent` — второй цвет градиента, `data-position` — `right` или `left`.
+`data-color` — основной цвет, `data-accent` — второй цвет градиента, `data-button-color` — цвет кнопки чата, `data-position` — `right` или `left`.
 
 ## Шаг 6. Проверка
 
