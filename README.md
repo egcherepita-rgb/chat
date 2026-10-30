@@ -109,11 +109,11 @@ systemctl restart site-chat
 <script src="https://chat.prometgs.ru/widget.js" async
   data-title="Практик HOME"
   data-greeting="Здравствуйте! Чем могу помочь?"
-  data-color="#2b7de9"
+  data-color="#255f6c"
   data-position="right"></script>
 ```
 
-`data-color` — цвет кнопки и шапки, `data-position` — `right` или `left`.
+`data-color` — основной цвет, `data-accent` — второй цвет градиента, `data-position` — `right` или `left`.
 
 ## Шаг 6. Проверка
 
