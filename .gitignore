@@ -2,3 +2,6 @@
 data.json
 data.json.tmp
 node_modules/
+# База знаний, которую собирает node scrape.js на сервере
+knowledge/site.md
+knowledge/catalog.json

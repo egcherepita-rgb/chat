@@ -16,6 +16,9 @@ const HOST = process.env.HOST || '127.0.0.1';
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const TG_API = process.env.TG_API || 'https://api.telegram.org';
+const LEADS_TO_GENERAL = process.env.LEADS_TO_GENERAL !== '0';
+const ai = require('./ai');
+const simple = require('./simple');
 
 if (!BOT_TOKEN || !GROUP_ID) {
   console.error('Укажите BOT_TOKEN и GROUP_ID в файле .env');
@@ -212,8 +215,18 @@ async function pollTelegram() {
         if (m.from && m.from.is_bot) continue;
         const visitorId = db.topics[m.message_thread_id];
         if (!visitorId) continue;
+        if (m.text && m.text.startsWith('/')) {
+          if (await operatorCommand(visitorId, m.text).catch((e) => (console.error(e.message), true))) continue;
+        }
         const msg = operatorMessage(m);
-        if (msg) addMessage(visitorId, msg);
+        if (!msg) continue;
+        addMessage(visitorId, msg);
+        // Менеджер ответил сам: ассистент замолкает в этом диалоге.
+        const v = getVisitor(visitorId);
+        const wasAi = ai.enabled && v.mode !== 'human';
+        v.mode = 'human';
+        v.humanAt = Date.now();
+        if (wasAi) toTopic(visitorId, '🤫 Вы ответили, ассистент замолчал в этом диалоге. Вернуть его: /bot').catch(() => {});
       }
       if (updates.length) save();
     } catch (e) {
@@ -221,6 +234,134 @@ async function pollTelegram() {
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
+}
+
+// ---------- ИИ-ассистент ----------
+
+const thinking = new Set(); // посетители, которым ассистент сейчас готовит ответ
+const again = new Set(); // пришло новое сообщение, пока ассистент думал
+
+function topicLink(topicId) {
+  return `https://t.me/c/${String(GROUP_ID).replace(/^-100/, '')}/${topicId}`;
+}
+
+async function toTopic(visitorId, text, extra) {
+  const topicId = getVisitor(visitorId).topicId;
+  if (!topicId) return null;
+  return tg('sendMessage', Object.assign({ chat_id: GROUP_ID, message_thread_id: topicId, text, link_preview_options: { is_disabled: true } }, extra));
+}
+
+function scheduleAi(visitorId) {
+  if (thinking.has(visitorId)) {
+    again.add(visitorId);
+    return;
+  }
+  thinking.add(visitorId);
+  wake(visitorId);
+  // Небольшая пауза: если посетитель пишет несколькими сообщениями подряд, ответим на все сразу.
+  setTimeout(() => runAi(visitorId), 1500);
+}
+
+async function runAi(visitorId) {
+  const v = getVisitor(visitorId);
+  try {
+    if (!ai.isActive(v) || !ai.underLimit(v)) return;
+    let reply = null;
+    if (ai.useLlm && !(v.flow && v.flow.step !== 'more')) {
+      v.flow = null;
+      try {
+        const messages = [{ role: 'system', content: ai.systemPrompt(v) }].concat(ai.history(v));
+        reply = ai.parseReply(await ai.complete(messages));
+      } catch (e) {
+        // Нейросеть недоступна (лимит, сеть): отвечает простой бот.
+        console.error('ИИ:', e.message);
+        noteAiError(visitorId, e);
+      }
+    }
+    if (!reply) reply = simple.reply(v);
+    if (!ai.isActive(v)) return; // пока бот думал, ответил менеджер
+    v.aiCount = (v.aiCount || 0) + 1;
+    save();
+    if (reply.text) {
+      addMessage(visitorId, { from: 'op', ai: true, text: reply.text, html: ai.toHtml(reply.text, escapeHtml) });
+      await toTopic(visitorId, '🤖 ' + ai.toPlain(reply.text)).catch((e) => console.error('Telegram:', e.message));
+    }
+    if (reply.lead) await sendLead(visitorId, reply.lead);
+    if (reply.handoff) {
+      v.mode = 'human';
+      v.humanAt = Date.now();
+      save();
+      await toTopic(visitorId, '🙋 Посетитель просит живого менеджера. Ассистент замолчал, ответьте в этой теме.\nВернуть ассистента: /bot').catch(() => {});
+    }
+  } catch (e) {
+    console.error('Бот:', e.message);
+  } finally {
+    thinking.delete(visitorId);
+    wake(visitorId);
+    if (again.delete(visitorId)) scheduleAi(visitorId);
+  }
+}
+
+let lastAiError = 0;
+function noteAiError(visitorId, e) {
+  // Пишем в тему не чаще раза в час, чтобы не засорять группу.
+  if (Date.now() - lastAiError < 3600e3) return;
+  lastAiError = Date.now();
+  toTopic(visitorId, '⚠️ Нейросеть недоступна (' + e.message.slice(0, 200) + '). Пока отвечает простой бот по ключевым словам.').catch(() => {});
+}
+
+async function sendLead(visitorId, lead) {
+  const v = getVisitor(visitorId);
+  if (lead.update) {
+    await toTopic(visitorId, '📝 Дополнение к заявке: ' + lead.request).catch(() => {});
+    return;
+  }
+  const digits = (x) => String(x || '').replace(/\D/g, '');
+  if (v.lead && (v.lead.contact === lead.contact || (digits(lead.contact).length > 5 && digits(v.lead.contact) === digits(lead.contact)))) return; // уже отправляли
+  v.lead = Object.assign({ at: Date.now() }, lead);
+  save();
+  const e = (x) => escapeHtml(x || '—');
+  const card =
+    '🔥 <b>Новая заявка с сайта</b>\n\n' +
+    `👤 <b>Имя:</b> ${e(lead.name)}\n` +
+    `📞 <b>Контакт:</b> ${e(lead.contact)}\n` +
+    `🏙 <b>Город:</b> ${e(lead.city)}\n` +
+    `📝 <b>Что нужно:</b> ${e(lead.request)}\n` +
+    (v.page ? `🔗 <b>Страница:</b> ${e(v.page)}\n` : '') +
+    `\nПосетитель #${v.n}`;
+  try {
+    const msg = await toTopic(visitorId, card, { parse_mode: 'HTML' });
+    if (msg) await tg('pinChatMessage', { chat_id: GROUP_ID, message_id: msg.message_id, disable_notification: true }).catch(() => {});
+    const name = ('🔥 ' + [lead.name, lead.city, `#${v.n}`].filter(Boolean).join(' · ')).slice(0, 120);
+    if (v.topicId) await tg('editForumTopic', { chat_id: GROUP_ID, message_thread_id: v.topicId, name }).catch(() => {});
+    if (LEADS_TO_GENERAL && v.topicId) {
+      await tg('sendMessage', {
+        chat_id: GROUP_ID,
+        text: card + `\n<a href="${topicLink(v.topicId)}">Открыть переписку</a>`,
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      });
+    }
+  } catch (err) {
+    console.error('Заявка:', err.message);
+  }
+}
+
+// Команды менеджера в теме посетителя.
+async function operatorCommand(visitorId, text) {
+  const cmd = (text.match(/^\/(bot|ai|stop|human)(@\w+)?\s*$/i) || [])[1];
+  if (!cmd) return false;
+  const v = getVisitor(visitorId);
+  if (/^(bot|ai)$/i.test(cmd)) {
+    v.mode = 'ai';
+    await toTopic(visitorId, ai.enabled ? '🤖 Ассистент снова отвечает посетителю.' : '⚠️ Бот выключен: укажите BOT_MODE=simple или ai в .env.');
+  } else {
+    v.mode = 'human';
+    v.humanAt = Date.now();
+    await toTopic(visitorId, '🤫 Ассистент молчит в этом диалоге. Вернуть: /bot');
+  }
+  save();
+  return true;
 }
 
 // ---------- HTTP ----------
@@ -290,13 +431,19 @@ async function handle(req, res) {
     if (!VISITOR_RE.test(visitor) || !text) return send(res, 400, { error: 'bad request' });
     if (tooFast(visitor)) return send(res, 429, { error: 'too many messages' });
     const msg = addMessage(visitor, { from: 'visitor', text });
+    const v = getVisitor(visitor);
+    if (page) v.page = page;
+    const useAi = ai.isActive(v) && ai.underLimit(v);
+    let tgError = null;
     try {
       await forwardToTelegram(visitor, text, page);
     } catch (e) {
+      tgError = e;
       console.error('Не удалось отправить в Telegram:', e.message);
-      return send(res, 502, { error: 'telegram', msg });
     }
-    return send(res, 200, { msg });
+    if (useAi) scheduleAi(visitor);
+    else if (tgError) return send(res, 502, { error: 'telegram', msg });
+    return send(res, 200, { msg, ai: useAi });
   }
 
   if (p === '/api/poll' && req.method === 'GET') {
@@ -304,7 +451,7 @@ async function handle(req, res) {
     const after = Number(url.searchParams.get('after') || 0);
     if (!VISITOR_RE.test(visitor)) return send(res, 400, { error: 'bad request' });
     const ready = messagesAfter(visitor, after);
-    if (ready.length || url.searchParams.get('wait') !== '1') return send(res, 200, { msgs: ready });
+    if (ready.length || url.searchParams.get('wait') !== '1') return send(res, 200, { msgs: ready, typing: thinking.has(visitor) });
     let done = false;
     const finish = () => {
       if (done) return;
@@ -312,7 +459,7 @@ async function handle(req, res) {
       clearTimeout(timer);
       const set = waiters.get(visitor);
       if (set) set.delete(finish);
-      send(res, 200, { msgs: messagesAfter(visitor, after) });
+      send(res, 200, { msgs: messagesAfter(visitor, after), typing: thinking.has(visitor) });
     };
     const timer = setTimeout(finish, POLL_TIMEOUT_MS);
     if (!waiters.has(visitor)) waiters.set(visitor, new Set());
@@ -381,7 +528,17 @@ http
 
 tg('deleteWebhook')
   .then(() => tg('getMe'))
-  .then((me) => console.log(`Бот @${me.username} подключён, группа ${GROUP_ID}`))
+  .then((me) => {
+    console.log(`Бот @${me.username} подключён, группа ${GROUP_ID}`);
+    if (ai.useLlm) console.log(`Бот: нейросеть ${ai.MODEL} (${ai.API_URL}), запасной вариант — простой бот`);
+    else if (ai.enabled) console.log('Бот: простой режим без нейросети (ответы по ключевым словам, сбор заявок)');
+    else console.log('Бот выключен (BOT_MODE=off): отвечают только менеджеры');
+    if (ai.enabled) {
+      ai.knowledge();
+      ai.catalog();
+      console.log(`Разделов для простого бота: ${simple.sections().length}`);
+    }
+  })
   .catch((e) => console.error('Проверьте BOT_TOKEN:', e.message))
   .finally(pollTelegram);
 
