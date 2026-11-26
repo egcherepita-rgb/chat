@@ -79,6 +79,9 @@
     '.msg pre,.msg code{font-family:monospace;background:rgba(0,0,0,.06);border-radius:4px;padding:0 3px}' +
     '.msg blockquote{margin:0;padding-left:8px;border-left:3px solid rgba(0,0,0,.2)}' +
     '.file{display:inline-block;padding:7px 12px;background:rgba(255,255,255,.7);border:1px solid rgba(0,0,0,.06);border-radius:12px;text-decoration:none!important;margin:2px 0}' +
+    '.typing{display:flex;gap:4px;align-items:center;padding:12px 14px}' +
+    '.typing i{width:7px;height:7px;border-radius:50%;background:' + cfg.accent + ';animation:sc-dot 1.2s infinite}' +
+    '.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}' +
     '.err{align-self:center;color:#d70015;font-size:12px}' +
     '.form{display:flex;align-items:flex-end;gap:8px;margin:10px;padding:5px 5px 5px 14px;border-radius:24px;background:rgba(255,255,255,.7);border:1px solid rgba(255,255,255,.85);box-shadow:inset 0 1px 2px rgba(0,0,0,.04)}' +
     'textarea{flex:1;border:0;resize:none;padding:8px 0;font:inherit;outline:none;height:38px;max-height:120px;color:#1c1c1e;background:transparent}' +
@@ -114,12 +117,30 @@
     var el = document.createElement('div');
     el.className = 'msg ' + cls;
     list.appendChild(el);
+    if (typingEl && typingEl.parentNode) list.appendChild(typingEl);
     list.scrollTop = list.scrollHeight;
     return el;
   }
 
   function fileUrl(f) {
     return BASE + '/api/file?visitor=' + visitor + '&id=' + encodeURIComponent(f.id);
+  }
+
+  var typingEl = null, typingTimer = null;
+  function setTyping(on) {
+    clearTimeout(typingTimer);
+    if (on) {
+      if (!typingEl) {
+        typingEl = document.createElement('div');
+        typingEl.className = 'msg op typing';
+        typingEl.innerHTML = '<i></i><i></i><i></i>';
+      }
+      list.appendChild(typingEl);
+      list.scrollTop = list.scrollHeight;
+      typingTimer = setTimeout(function () { setTyping(false); }, 60000);
+    } else if (typingEl && typingEl.parentNode) {
+      typingEl.parentNode.removeChild(typingEl);
+    }
   }
 
   var pending = []; // тексты, отправленные с этой страницы и ещё не пришедшие из poll
@@ -138,6 +159,7 @@
       bubble('me').textContent = m.text;
       return;
     }
+    setTyping(false);
     var el = bubble('op');
     if (m.file) {
       if (m.file.kind === 'image') {
@@ -171,8 +193,9 @@
   }
 
   var pendingUnread = 0;
-  function handle(msgs) {
+  function handle(msgs, typing) {
     msgs.forEach(render);
+    if (typing !== undefined) setTyping(typing);
     if (isOpen) markSeen();
     else {
       pendingUnread += unread(msgs.filter(function (m) { return m.id > seen; }));
@@ -207,7 +230,7 @@
     polling = true;
     (function loop() {
       request('GET', '/api/poll?wait=1&visitor=' + visitor + '&after=' + lastId, null, function (err, data) {
-        if (!err && data) handle(data.msgs);
+        if (!err && data) handle(data.msgs, data.typing);
         setTimeout(loop, err ? 5000 : 300);
       });
     })();
@@ -224,6 +247,7 @@
         if (idx >= 0) pending.splice(idx, 1);
       }
       if (msg && msg.id > lastId) lastId = msg.id;
+      if (data && data.ai) setTyping(true);
       if (err) {
         var e = document.createElement('div');
         e.className = 'err';
