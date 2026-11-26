@@ -1,22 +1,41 @@
 'use strict';
-// ИИ-ассистент: отвечает посетителям по базе знаний (папка knowledge/),
+// Ассистент в чате: отвечает посетителям по базе знаний (папка knowledge/),
 // собирает заявку (имя, контакт, город) и замолкает, когда отвечает менеджер.
-// Работает с любым API, совместимым с OpenAI (по умолчанию Yandex AI Studio).
+// Два режима (BOT_MODE):
+//   ai     — нейросеть через любой API, совместимый с OpenAI (Gemini, Groq, YandexGPT, OpenRouter…);
+//   simple — без нейросети и бесплатно: ответы по ключевым словам и сбор заявки по сценарию (simple.js).
+// Если нейросеть недоступна (кончился бесплатный лимит, сбой сети), отвечает простой режим.
 
 const fs = require('fs');
 const path = require('path');
 
-const API_URL = (process.env.LLM_API_URL || 'https://llm.api.cloud.yandex.net/v1').replace(/\/+$/, '');
+// Готовые настройки популярных провайдеров (LLM_PROVIDER). Любое значение можно переопределить в .env.
+const PRESETS = {
+  gemini: { url: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-flash' },
+  groq: { url: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-120b' },
+  openrouter: { url: 'https://openrouter.ai/api/v1', model: '' },
+  yandex: { url: 'https://llm.api.cloud.yandex.net/v1', model: 'yandexgpt-5.1' },
+};
+const PROVIDER = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
+const preset = PRESETS[PROVIDER] || { url: '', model: '' };
 const API_KEY = process.env.LLM_API_KEY || '';
-const FOLDER = process.env.LLM_FOLDER || '';
-const MODEL_RAW = process.env.LLM_MODEL || 'yandexgpt-5.1';
+const FOLDER = process.env.LLM_FOLDER || ''; // только для Яндекса: ID каталога
+let API_URL = (process.env.LLM_API_URL || preset.url).replace(/\/+$/, '');
+// Прокси (Cloudflare Worker), если сервис недоступен с сервера: https://worker/<хост>/<путь>
+if (process.env.LLM_PROXY && API_URL) {
+  const u = new URL(API_URL);
+  API_URL = process.env.LLM_PROXY.replace(/\/+$/, '') + '/' + u.host + u.pathname.replace(/\/+$/, '');
+}
+const MODEL_RAW = process.env.LLM_MODEL || preset.model;
 const MODEL = MODEL_RAW.includes('://') || !FOLDER ? MODEL_RAW : `gpt://${FOLDER}/${MODEL_RAW}`;
 const KNOWLEDGE_DIR = process.env.KNOWLEDGE_DIR || path.join(__dirname, 'knowledge');
 const MAX_PER_DAY = Number(process.env.AI_MAX_PER_DAY || 40);
 const RESUME_HOURS = Number(process.env.AI_RESUME_HOURS || 12);
 const HISTORY = 30;
 
-const enabled = Boolean(API_KEY) && process.env.AI_ENABLED !== '0';
+const BOT_MODE = (process.env.BOT_MODE || (API_KEY ? 'ai' : 'off')).toLowerCase();
+const useLlm = BOT_MODE === 'ai' && Boolean(API_KEY && API_URL && MODEL);
+const enabled = useLlm || BOT_MODE === 'simple' || BOT_MODE === 'ai';
 
 // ---------- База знаний ----------
 
@@ -136,7 +155,13 @@ async function complete(messages) {
   const res = await fetch(`${API_URL}/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ model: MODEL, messages, temperature: 0.3, max_tokens: 700 }),
+    body: JSON.stringify(
+      Object.assign(
+        { model: MODEL, messages, temperature: 0.3, max_tokens: 1000 },
+        // У Gemini 2.5 Flash «размышления» съедают лимит ответа и время: для чата они не нужны.
+        PROVIDER === 'gemini' && /2\.5-flash/.test(MODEL) ? { reasoning_effort: 'none' } : {}
+      )
+    ),
     signal: AbortSignal.timeout(45000),
   });
   const raw = await res.text();
@@ -235,4 +260,4 @@ function history(v) {
   return out;
 }
 
-module.exports = { enabled, catalog, productsFor, MODEL, API_URL, knowledge, systemPrompt, complete, parseReply, toHtml, toPlain, isActive, underLimit, history };
+module.exports = { enabled, useLlm, BOT_MODE, KNOWLEDGE_DIR, stems, productLine, htmlToText, catalog, productsFor, MODEL, API_URL, knowledge, systemPrompt, complete, parseReply, toHtml, toPlain, isActive, underLimit, history };

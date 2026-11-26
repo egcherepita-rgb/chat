@@ -18,6 +18,7 @@ const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const TG_API = process.env.TG_API || 'https://api.telegram.org';
 const LEADS_TO_GENERAL = process.env.LEADS_TO_GENERAL !== '0';
 const ai = require('./ai');
+const simple = require('./simple');
 
 if (!BOT_TOKEN || !GROUP_ID) {
   console.error('Укажите BOT_TOKEN и GROUP_ID в файле .env');
@@ -265,11 +266,22 @@ async function runAi(visitorId) {
   const v = getVisitor(visitorId);
   try {
     if (!ai.isActive(v) || !ai.underLimit(v)) return;
-    const messages = [{ role: 'system', content: ai.systemPrompt(v) }].concat(ai.history(v));
-    const raw = await ai.complete(messages);
-    if (!ai.isActive(v)) return; // пока модель думала, ответил менеджер
-    const reply = ai.parseReply(raw);
+    let reply = null;
+    if (ai.useLlm && !(v.flow && v.flow.step !== 'more')) {
+      v.flow = null;
+      try {
+        const messages = [{ role: 'system', content: ai.systemPrompt(v) }].concat(ai.history(v));
+        reply = ai.parseReply(await ai.complete(messages));
+      } catch (e) {
+        // Нейросеть недоступна (лимит, сеть): отвечает простой бот.
+        console.error('ИИ:', e.message);
+        noteAiError(visitorId, e);
+      }
+    }
+    if (!reply) reply = simple.reply(v);
+    if (!ai.isActive(v)) return; // пока бот думал, ответил менеджер
     v.aiCount = (v.aiCount || 0) + 1;
+    save();
     if (reply.text) {
       addMessage(visitorId, { from: 'op', ai: true, text: reply.text, html: ai.toHtml(reply.text, escapeHtml) });
       await toTopic(visitorId, '🤖 ' + ai.toPlain(reply.text)).catch((e) => console.error('Telegram:', e.message));
@@ -282,8 +294,7 @@ async function runAi(visitorId) {
       await toTopic(visitorId, '🙋 Посетитель просит живого менеджера. Ассистент замолчал, ответьте в этой теме.\nВернуть ассистента: /bot').catch(() => {});
     }
   } catch (e) {
-    console.error('ИИ:', e.message);
-    await toTopic(visitorId, '⚠️ Ассистент не смог ответить (' + e.message.slice(0, 200) + '). Ответьте, пожалуйста, вручную.').catch(() => {});
+    console.error('Бот:', e.message);
   } finally {
     thinking.delete(visitorId);
     wake(visitorId);
@@ -291,8 +302,20 @@ async function runAi(visitorId) {
   }
 }
 
+let lastAiError = 0;
+function noteAiError(visitorId, e) {
+  // Пишем в тему не чаще раза в час, чтобы не засорять группу.
+  if (Date.now() - lastAiError < 3600e3) return;
+  lastAiError = Date.now();
+  toTopic(visitorId, '⚠️ Нейросеть недоступна (' + e.message.slice(0, 200) + '). Пока отвечает простой бот по ключевым словам.').catch(() => {});
+}
+
 async function sendLead(visitorId, lead) {
   const v = getVisitor(visitorId);
+  if (lead.update) {
+    await toTopic(visitorId, '📝 Дополнение к заявке: ' + lead.request).catch(() => {});
+    return;
+  }
   const digits = (x) => String(x || '').replace(/\D/g, '');
   if (v.lead && (v.lead.contact === lead.contact || (digits(lead.contact).length > 5 && digits(v.lead.contact) === digits(lead.contact)))) return; // уже отправляли
   v.lead = Object.assign({ at: Date.now() }, lead);
@@ -331,7 +354,7 @@ async function operatorCommand(visitorId, text) {
   const v = getVisitor(visitorId);
   if (/^(bot|ai)$/i.test(cmd)) {
     v.mode = 'ai';
-    await toTopic(visitorId, ai.enabled ? '🤖 Ассистент снова отвечает посетителю.' : '⚠️ Ассистент не настроен: нет LLM_API_KEY в .env.');
+    await toTopic(visitorId, ai.enabled ? '🤖 Ассистент снова отвечает посетителю.' : '⚠️ Бот выключен: укажите BOT_MODE=simple или ai в .env.');
   } else {
     v.mode = 'human';
     v.humanAt = Date.now();
@@ -507,11 +530,14 @@ tg('deleteWebhook')
   .then(() => tg('getMe'))
   .then((me) => {
     console.log(`Бот @${me.username} подключён, группа ${GROUP_ID}`);
+    if (ai.useLlm) console.log(`Бот: нейросеть ${ai.MODEL} (${ai.API_URL}), запасной вариант — простой бот`);
+    else if (ai.enabled) console.log('Бот: простой режим без нейросети (ответы по ключевым словам, сбор заявок)');
+    else console.log('Бот выключен (BOT_MODE=off): отвечают только менеджеры');
     if (ai.enabled) {
-      console.log(`ИИ-ассистент включён: ${ai.MODEL} (${ai.API_URL})`);
       ai.knowledge();
       ai.catalog();
-    } else console.log('ИИ-ассистент выключен (нет LLM_API_KEY в .env)');
+      console.log(`Разделов для простого бота: ${simple.sections().length}`);
+    }
   })
   .catch((e) => console.error('Проверьте BOT_TOKEN:', e.message))
   .finally(pollTelegram);
